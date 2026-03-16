@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Gateway MCP — Dashboard</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+      padding: 2rem;
+    }
+
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 600;
+      margin-bottom: 0.25rem;
+      color: #f8fafc;
+    }
+
+    .subtitle {
+      font-size: 0.875rem;
+      color: #64748b;
+      margin-bottom: 2rem;
+    }
+
+    /* Add server form */
+    .add-form {
+      background: #1e2130;
+      border: 1px solid #2d3148;
+      border-radius: 8px;
+      padding: 1.25rem 1.5rem;
+      margin-bottom: 2rem;
+      display: flex;
+      gap: 0.75rem;
+      align-items: flex-end;
+      flex-wrap: wrap;
+    }
+
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 0.375rem;
+    }
+
+    .field label {
+      font-size: 0.75rem;
+      font-weight: 500;
+      color: #94a3b8;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .field input {
+      background: #0f1117;
+      border: 1px solid #2d3148;
+      border-radius: 6px;
+      color: #e2e8f0;
+      font-size: 0.875rem;
+      padding: 0.5rem 0.75rem;
+      width: 220px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+
+    .field input:focus { border-color: #6366f1; }
+    .field input::placeholder { color: #475569; }
+
+    button {
+      cursor: pointer;
+      border: none;
+      border-radius: 6px;
+      font-size: 0.875rem;
+      font-weight: 500;
+      padding: 0.5rem 1rem;
+      transition: opacity 0.15s, background 0.15s;
+    }
+
+    button:hover { opacity: 0.85; }
+    button:active { opacity: 0.7; }
+
+    .btn-primary { background: #6366f1; color: #fff; }
+    .btn-connect { background: #0ea5e9; color: #fff; font-size: 0.75rem; padding: 0.35rem 0.75rem; }
+    .btn-delete  { background: #475569; color: #e2e8f0; font-size: 0.75rem; padding: 0.35rem 0.75rem; }
+
+    /* Server list */
+    .servers-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 0.75rem;
+    }
+
+    .servers-title { font-size: 1rem; font-weight: 600; color: #f8fafc; }
+
+    .poll-indicator {
+      font-size: 0.75rem;
+      color: #475569;
+    }
+
+    .server-list { display: flex; flex-direction: column; gap: 0.75rem; }
+
+    .server-card {
+      background: #1e2130;
+      border: 1px solid #2d3148;
+      border-radius: 8px;
+      padding: 1rem 1.25rem;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .server-info { flex: 1; min-width: 0; }
+
+    .server-name {
+      font-weight: 600;
+      font-size: 0.9375rem;
+      color: #f1f5f9;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .server-url {
+      font-size: 0.75rem;
+      color: #64748b;
+      margin-top: 0.125rem;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    /* Status badges */
+    .badge {
+      display: inline-block;
+      border-radius: 999px;
+      font-size: 0.7rem;
+      font-weight: 600;
+      padding: 0.2rem 0.6rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      white-space: nowrap;
+    }
+
+    .badge-disconnected { background: #1e293b; color: #64748b; border: 1px solid #334155; }
+    .badge-connecting   { background: #78350f33; color: #fbbf24; border: 1px solid #92400e; }
+    .badge-connected    { background: #05966933; color: #34d399; border: 1px solid #065f46; }
+    .badge-auth_required{ background: #7f1d1d33; color: #f87171; border: 1px solid #991b1b; }
+
+    .server-actions { display: flex; gap: 0.5rem; flex-shrink: 0; }
+
+    .empty-state {
+      color: #475569;
+      font-size: 0.875rem;
+      text-align: center;
+      padding: 2.5rem;
+      border: 1px dashed #2d3148;
+      border-radius: 8px;
+    }
+
+    .toast {
+      position: fixed;
+      bottom: 1.5rem;
+      right: 1.5rem;
+      background: #1e2130;
+      border: 1px solid #2d3148;
+      border-radius: 8px;
+      padding: 0.75rem 1.25rem;
+      font-size: 0.875rem;
+      color: #e2e8f0;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.3s;
+      max-width: 320px;
+      z-index: 999;
+    }
+
+    .toast.show { opacity: 1; }
+    .toast.error { border-color: #991b1b; color: #f87171; }
+  </style>
+</head>
+<body>
+
+  <h1>Gateway MCP Dashboard</h1>
+  <p class="subtitle">Manage downstream MCP servers and their OAuth connections.</p>
+
+  <div class="add-form">
+    <div class="field">
+      <label for="inp-name">Server name</label>
+      <input id="inp-name" type="text" placeholder="e.g. DiscordMcp" autocomplete="off" />
+    </div>
+    <div class="field">
+      <label for="inp-url">Server URL</label>
+      <input id="inp-url" type="text" placeholder="http://localhost:7072/" autocomplete="off" />
+    </div>
+    <button class="btn-primary" onclick="addServer()">Add Server</button>
+  </div>
+
+  <div class="servers-header">
+    <span class="servers-title">Registered servers</span>
+    <span class="poll-indicator" id="poll-label">auto-refreshing…</span>
+  </div>
+
+  <div class="server-list" id="server-list">
+    <div class="empty-state">No servers registered yet.</div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    let servers = [];
+
+    function statusBadge(status) {
+      return `<span class="badge badge-${status}">${status.replace('_', ' ')}</span>`;
+    }
+
+    function render(data) {
+      servers = data;
+      const list = document.getElementById('server-list');
+      if (!data.length) {
+        list.innerHTML = '<div class="empty-state">No servers registered yet.</div>';
+        return;
+      }
+      list.innerHTML = data.map(s => `
+        <div class="server-card" id="card-${s.id}">
+          <div class="server-info">
+            <div class="server-name">${esc(s.name)}</div>
+            <div class="server-url">${esc(s.url)}</div>
+          </div>
+          ${statusBadge(s.status)}
+          <div class="server-actions">
+            <button class="btn-connect" onclick="connectServer('${s.id}')">Connect</button>
+            <button class="btn-delete"  onclick="deleteServer('${s.id}')">Delete</button>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    async function poll() {
+      try {
+        const res = await fetch('/api/servers');
+        if (!res.ok) return;
+        render(await res.json());
+        document.getElementById('poll-label').textContent = `updated ${new Date().toLocaleTimeString()}`;
+      } catch (_) {}
+    }
+
+    async function addServer() {
+      const name = document.getElementById('inp-name').value.trim();
+      const url  = document.getElementById('inp-url').value.trim();
+      if (!name || !url) { showToast('Name and URL are required.', true); return; }
+
+      try {
+        const res = await fetch('/api/servers', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, url })
+        });
+        if (!res.ok) { showToast('Failed to add server.', true); return; }
+        document.getElementById('inp-name').value = '';
+        document.getElementById('inp-url').value = '';
+        await poll();
+        showToast(`Added "${name}".`);
+      } catch (e) {
+        showToast('Network error.', true);
+      }
+    }
+
+    function connectServer(id) {
+      // Open in same tab — server will 302-redirect to Keycloak, then back via /api/oauth/callback
+      window.location.href = `/api/servers/${id}/connect`;
+    }
+
+    async function deleteServer(id) {
+      const s = servers.find(x => x.id === id);
+      if (!confirm(`Delete "${s?.name ?? id}"?`)) return;
+      try {
+        const res = await fetch(`/api/servers/${id}`, { method: 'DELETE' });
+        if (!res.ok) { showToast('Failed to delete.', true); return; }
+        await poll();
+        showToast('Deleted.');
+      } catch (e) {
+        showToast('Network error.', true);
+      }
+    }
+
+    let toastTimer;
+    function showToast(msg, isError = false) {
+      const el = document.getElementById('toast');
+      el.textContent = msg;
+      el.classList.toggle('error', isError);
+      el.classList.add('show');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => el.classList.remove('show'), 3000);
+    }
+
+    function esc(str) {
+      return String(str)
+        .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+        .replace(/"/g,'&quot;');
+    }
+
+    // Initial load + polling every 2 seconds
+    poll();
+    setInterval(poll, 2000);
+  </script>
+</body>
+</html>

@@ -6,6 +6,17 @@ namespace GatewayMcp;
 [McpServerToolType]
 public class Tools
 {
+    private readonly DownstreamMcpRegistry _registry;
+
+    public Tools(DownstreamMcpRegistry registry) => _registry = registry;
+
+    [McpServerTool, Description("Relays a tool call to a registered downstream MCP server.")]
+    public async Task<string> RelayCall(
+        [Description("Name of the downstream server to call.")] string serverName,
+        [Description("Name of the tool to invoke on the downstream server.")] string tool,
+        [Description("JSON object of parameters to pass to the tool.")] string paramsJson = "{}")
+        => await _registry.RelayCallAsync(serverName, tool, paramsJson, CancellationToken.None);
+
     [McpServerTool, Description("Returns a greeting message for the given name.")]
     public static string SayHello(string name) =>
         $"Hello, {name}! Welcome to the Gateway MCP server.";
