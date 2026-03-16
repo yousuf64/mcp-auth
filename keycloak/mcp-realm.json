@@ -23,7 +23,7 @@
       "directAccessGrantsEnabled": false,
       "redirectUris": ["http://localhost:7071/dashboard"],
       "webOrigins": ["http://localhost:7071"],
-      "defaultClientScopes": ["basic", "profile", "mcp:tools"],
+      "defaultClientScopes": ["profile", "mcp:tools"],
       "optionalClientScopes": [],
       "attributes": {
         "pkce.code.challenge.method": "S256"
@@ -50,6 +50,16 @@
             "included.custom.audience": "http://localhost:7071/",
             "access.token.claim": "true",
             "id.token.claim": "false"
+          }
+        },
+        {
+          "name": "sub",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-sub-mapper",
+          "consentRequired": false,
+          "config": {
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
           }
         }
       ]
