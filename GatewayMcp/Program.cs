@@ -17,6 +17,9 @@ builder.Services.AddAuthentication(options =>
     })
     .AddJwtBearer(options =>
     {
+        // In .NET 8+, JwtBearerOptions.MapInboundClaims controls the new JsonWebTokenHandler.
+        // Setting false preserves original claim names (sub, preferred_username, etc.)
+        options.MapInboundClaims = false;
         options.Authority = keycloakUrl;
         options.RequireHttpsMetadata = false;
         options.TokenValidationParameters = new TokenValidationParameters
@@ -47,7 +50,7 @@ builder.Services.AddAuthentication(options =>
             },
             OnChallenge = context =>
             {
-                Console.WriteLine("Challenging client to authenticate with Entra ID");
+                Console.WriteLine("Challenging client to authenticate with Keycloak");
                 return Task.CompletedTask;
             }
         };
@@ -76,36 +79,46 @@ app.UseStaticFiles();
 app.UseAuthentication();
 app.UseAuthorization();
 
+// Helper: extract the 'sub' claim from the authenticated user.
+static string GetUserId(HttpContext ctx) =>
+    ctx.User.FindFirstValue("sub") ?? throw new InvalidOperationException("No sub claim in token.");
+
 // --- REST API ---
 
-// Redirect /dashboard → /index.html
-app.MapGet("/dashboard", () => Results.Redirect("/index.html"));
+// Redirect /dashboard → /index.html, preserving query string (needed for OAuth ?code= callback)
+app.MapGet("/dashboard", (HttpContext ctx) =>
+{
+    var qs = ctx.Request.QueryString.Value;
+    return Results.Redirect($"/index.html{qs}");
+});
 
 // GET /api/servers
-app.MapGet("/api/servers", (DownstreamMcpRegistry registry) =>
-    Results.Ok(registry.GetServers()));
+app.MapGet("/api/servers", (DownstreamMcpRegistry registry, HttpContext ctx) =>
+    Results.Ok(registry.GetServers(GetUserId(ctx))))
+    .RequireAuthorization();
 
 // POST /api/servers
-app.MapPost("/api/servers", (DownstreamMcpRegistry registry, AddServerRequest req) =>
+app.MapPost("/api/servers", (DownstreamMcpRegistry registry, HttpContext ctx, AddServerRequest req) =>
 {
     if (string.IsNullOrWhiteSpace(req.Name) || string.IsNullOrWhiteSpace(req.Url))
         return Results.BadRequest("name and url are required.");
 
-    var entry = registry.AddServer(req.Name, req.Url);
+    var entry = registry.AddServer(GetUserId(ctx), req.Name, req.Url);
     return Results.Created($"/api/servers/{entry.Id}", entry);
-});
+}).RequireAuthorization();
 
 // DELETE /api/servers/{id}
-app.MapDelete("/api/servers/{id}", (DownstreamMcpRegistry registry, string id) =>
-    registry.RemoveServer(id) ? Results.NoContent() : Results.NotFound());
+app.MapDelete("/api/servers/{id}", (DownstreamMcpRegistry registry, HttpContext ctx, string id) =>
+    registry.RemoveServer(GetUserId(ctx), id) ? Results.NoContent() : Results.NotFound())
+    .RequireAuthorization();
 
-// GET /api/servers/{id}/connect — initiates OAuth, 302-redirects browser to Keycloak
-app.MapGet("/api/servers/{id}/connect", async (DownstreamMcpRegistry registry, string id, CancellationToken ct) =>
+// GET /api/servers/{id}/connect — returns JSON { authUrl } so the dashboard can window.open() it
+app.MapGet("/api/servers/{id}/connect", async (DownstreamMcpRegistry registry, HttpContext ctx, string id, CancellationToken ct) =>
 {
     try
     {
-        var authUrl = await registry.InitiateConnectAsync(id, ct);
-        return Results.Redirect(authUrl.ToString());
+        var authUrl = await registry.InitiateConnectAsync(GetUserId(ctx), id, ct);
+        return Results.Ok(new { authUrl = authUrl.ToString() });
     }
     catch (KeyNotFoundException ex)
     {
@@ -115,9 +128,10 @@ app.MapGet("/api/servers/{id}/connect", async (DownstreamMcpRegistry registry, s
     {
         return Results.Problem($"Failed to initiate connect: {ex.Message}");
     }
-});
+}).RequireAuthorization();
 
 // GET /api/oauth/callback/{serverId} — Keycloak redirects here with ?code=...
+// Intentionally unauthenticated — this is a browser redirect target, no Bearer token present.
 app.MapGet("/api/oauth/callback/{serverId}", (DownstreamMcpRegistry registry, HttpContext ctx, string serverId) =>
 {
     var query = HttpUtility.ParseQueryString(ctx.Request.QueryString.Value ?? "");

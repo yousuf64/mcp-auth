@@ -9,11 +9,14 @@ namespace GatewayMcp;
 public class DownstreamMcpRegistry
 {
     private const string GatewayCallbackBase = "http://localhost:7071/api/oauth/callback";
-    private const string DataFile = "downstream-servers.json";
     private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
 
+    // Key: "{userId}:{serverId}" — unique per user-server pair
     private readonly ConcurrentDictionary<string, DownstreamServerEntry> _servers = new();
+
+    // Key: serverId alone — server IDs are unique UUIDs, no cross-user collision possible
     private readonly ConcurrentDictionary<string, TaskCompletionSource<string?>> _pendingCallbacks = new();
+
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<DownstreamMcpRegistry> _logger;
 
@@ -26,59 +29,72 @@ public class DownstreamMcpRegistry
 
     private void LoadFromDisk()
     {
-        if (!File.Exists(DataFile))
-            return;
+        var dir = Path.Combine(AppContext.BaseDirectory, "data");
+        if (!Directory.Exists(dir)) return;
 
-        try
+        foreach (var file in Directory.GetFiles(dir, "servers-*.json"))
         {
-            var json = File.ReadAllText(DataFile);
-            var entries = JsonSerializer.Deserialize<List<DownstreamServerEntry>>(json, _jsonOptions);
-            if (entries is null) return;
-
-            foreach (var entry in entries)
+            try
             {
-                var cache = new FileTokenCache(entry.Id);
-                entry.Status = cache.HasTokens() ? "connected" : "disconnected";
-                _servers[entry.Id] = entry;
+                var fileName = Path.GetFileNameWithoutExtension(file);
+                var userId = fileName.Substring("servers-".Length);
+                var json = File.ReadAllText(file);
+                var entries = JsonSerializer.Deserialize<List<DownstreamServerEntry>>(json, _jsonOptions);
+                if (entries is null) continue;
+
+                foreach (var entry in entries)
+                {
+                    var cache = new FileTokenCache(userId, entry.Id);
+                    entry.Status = cache.HasTokens() ? "connected" : "disconnected";
+                    _servers[$"{userId}:{entry.Id}"] = entry;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to load downstream servers from '{File}'.", file);
             }
         }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to load downstream servers from disk.");
-        }
     }
 
-    private void SaveToDisk()
+    private void SaveToDisk(string userId)
     {
         try
         {
-            var json = JsonSerializer.Serialize(_servers.Values.ToList(), _jsonOptions);
-            File.WriteAllText(DataFile, json);
+            var dir = Path.Combine(AppContext.BaseDirectory, "data");
+            Directory.CreateDirectory(dir);
+            var userEntries = _servers
+                .Where(kv => kv.Key.StartsWith($"{userId}:"))
+                .Select(kv => kv.Value)
+                .ToList();
+            var json = JsonSerializer.Serialize(userEntries, _jsonOptions);
+            File.WriteAllText(Path.Combine(dir, $"servers-{userId}.json"), json);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to save downstream servers to disk.");
+            _logger.LogError(ex, "Failed to save downstream servers for user '{UserId}'.", userId);
         }
     }
 
-    public IEnumerable<DownstreamServerEntry> GetServers() => _servers.Values;
+    public IEnumerable<DownstreamServerEntry> GetServers(string userId) =>
+        _servers
+            .Where(kv => kv.Key.StartsWith($"{userId}:"))
+            .Select(kv => kv.Value);
 
-    public DownstreamServerEntry AddServer(string name, string url)
+    public DownstreamServerEntry AddServer(string userId, string name, string url)
     {
         var entry = new DownstreamServerEntry { Name = name, Url = url };
-        _servers[entry.Id] = entry;
-        SaveToDisk();
+        _servers[$"{userId}:{entry.Id}"] = entry;
+        SaveToDisk(userId);
         return entry;
     }
 
-    public bool RemoveServer(string id)
+    public bool RemoveServer(string userId, string id)
     {
-        if (!_servers.TryRemove(id, out _))
+        if (!_servers.TryRemove($"{userId}:{id}", out _))
             return false;
 
-        var cache = new FileTokenCache(id);
-        cache.DeleteTokens();
-        SaveToDisk();
+        new FileTokenCache(userId, id).DeleteTokens();
+        SaveToDisk(userId);
         return true;
     }
 
@@ -86,16 +102,16 @@ public class DownstreamMcpRegistry
     /// Initiates the OAuth connect flow for the given server.
     /// Fires a background task that creates an MCP client, triggering OAuth.
     /// The AuthorizationRedirectDelegate signals authUrlTcs with the Keycloak URL.
-    /// Returns the Keycloak authorization URL to redirect the browser to.
+    /// Returns the Keycloak authorization URL for the browser to open in a popup.
     /// </summary>
-    public async Task<Uri> InitiateConnectAsync(string id, CancellationToken cancellationToken)
+    public async Task<Uri> InitiateConnectAsync(string userId, string id, CancellationToken cancellationToken)
     {
-        if (!_servers.TryGetValue(id, out var entry))
+        if (!_servers.TryGetValue($"{userId}:{id}", out var entry))
             throw new KeyNotFoundException($"Server '{id}' not found.");
 
         entry.Status = "connecting";
 
-        var tokenCache = new FileTokenCache(id);
+        var tokenCache = new FileTokenCache(userId, id);
         var authUrlTcs = new TaskCompletionSource<Uri>(TaskCreationOptions.RunContinuationsAsynchronously);
 
         var oauthOptions = new ClientOAuthOptions
@@ -170,6 +186,7 @@ public class DownstreamMcpRegistry
 
     /// <summary>
     /// Called when the browser completes the OAuth flow and Keycloak redirects back.
+    /// serverId alone is sufficient — each server entry has a unique UUID, no cross-user collision.
     /// </summary>
     public bool CompleteOAuthCallback(string code, string serverId)
     {
@@ -184,17 +201,19 @@ public class DownstreamMcpRegistry
     }
 
     /// <summary>
-    /// Relays a tool call to the named downstream MCP server using stored tokens.
+    /// Relays a tool call to the named downstream MCP server using stored tokens for the given user.
     /// </summary>
-    public async Task<string> RelayCallAsync(string serverName, string tool, string paramsJson, CancellationToken cancellationToken)
+    public async Task<string> RelayCallAsync(string userId, string serverName, string tool, string paramsJson, CancellationToken cancellationToken)
     {
-        var entry = _servers.Values.FirstOrDefault(s =>
-            string.Equals(s.Name, serverName, StringComparison.OrdinalIgnoreCase));
+        var entry = _servers
+            .Where(kv => kv.Key.StartsWith($"{userId}:"))
+            .Select(kv => kv.Value)
+            .FirstOrDefault(s => string.Equals(s.Name, serverName, StringComparison.OrdinalIgnoreCase));
 
         if (entry is null)
             return $"Error: No downstream server named '{serverName}' is registered.";
 
-        var tokenCache = new FileTokenCache(entry.Id);
+        var tokenCache = new FileTokenCache(userId, entry.Id);
         if (!tokenCache.HasTokens())
             return $"Error: Server '{serverName}' is not connected. Use the dashboard to authorize it first.";
 

@@ -8,11 +8,11 @@ public class FileTokenCache : ITokenCache
     private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
     private readonly string _filePath;
 
-    public FileTokenCache(string serverId)
+    public FileTokenCache(string userId, string serverId)
     {
         var dir = Path.Combine(AppContext.BaseDirectory, "tokens");
         Directory.CreateDirectory(dir);
-        _filePath = Path.Combine(dir, $"{serverId}.json");
+        _filePath = Path.Combine(dir, $"{userId}-{serverId}.json");
     }
 
     public bool HasTokens() => File.Exists(_filePath);

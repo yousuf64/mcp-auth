@@ -1,4 +1,6 @@
 using System.ComponentModel;
+using System.Security.Claims;
+using Microsoft.AspNetCore.Http;
 using ModelContextProtocol.Server;
 
 namespace GatewayMcp;
@@ -7,15 +9,25 @@ namespace GatewayMcp;
 public class Tools
 {
     private readonly DownstreamMcpRegistry _registry;
+    private readonly IHttpContextAccessor _httpContextAccessor;
 
-    public Tools(DownstreamMcpRegistry registry) => _registry = registry;
+    public Tools(DownstreamMcpRegistry registry, IHttpContextAccessor httpContextAccessor)
+    {
+        _registry = registry;
+        _httpContextAccessor = httpContextAccessor;
+    }
 
     [McpServerTool, Description("Relays a tool call to a registered downstream MCP server.")]
     public async Task<string> RelayCall(
         [Description("Name of the downstream server to call.")] string serverName,
         [Description("Name of the tool to invoke on the downstream server.")] string tool,
         [Description("JSON object of parameters to pass to the tool.")] string paramsJson = "{}")
-        => await _registry.RelayCallAsync(serverName, tool, paramsJson, CancellationToken.None);
+    {
+        var userId = _httpContextAccessor.HttpContext?.User?.FindFirstValue("sub");
+        if (string.IsNullOrEmpty(userId))
+            return "Error: Could not determine caller identity.";
+        return await _registry.RelayCallAsync(userId, serverName, tool, paramsJson, CancellationToken.None);
+    }
 
     [McpServerTool, Description("Returns a greeting message for the given name.")]
     public static string SayHello(string name) =>

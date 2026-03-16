@@ -15,6 +15,20 @@
   "defaultOptionalClientScopes": ["mcp:tools"],
 
   "clients": [
+    {
+      "clientId": "gateway-dashboard",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": ["http://localhost:7071/dashboard"],
+      "webOrigins": ["http://localhost:7071"],
+      "defaultClientScopes": ["basic", "profile", "mcp:tools"],
+      "optionalClientScopes": [],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      }
+    }
   ],
 
   "clientScopes": [
