@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="GatewayMcp/GatewayMcp.csproj" />
+  <Project Path="GatewayMcpClient/GatewayMcpClient.csproj" />
+  <Project Path="DiscordMcp/DiscordMcp.csproj" />
+  <Project Path="DiscordMcpClient/DiscordMcpClient.csproj" />
+</Solution>
