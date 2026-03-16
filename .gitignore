@@ -3,3 +3,10 @@ obj/
 /packages/
 riderModule.iml
 /_ReSharper.Caches/
+
+# IDE
+.idea/
+*.DotSettings.user
+
+# Runtime data
+downstream-servers.json
