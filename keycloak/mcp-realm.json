@@ -68,18 +68,38 @@
 
   "users": [
     {
-      "username": "mcpuser",
+      "username": "alice",
       "enabled": true,
       "emailVerified": true,
-      "firstName": "MCP",
-      "lastName": "User",
-      "email": "mcpuser@example.com",
+      "firstName": "Alice",
+      "lastName": "Smith",
+      "email": "alice@example.com",
       "credentials": [
-        {
-          "type": "password",
-          "value": "password",
-          "temporary": false
-        }
+        { "type": "password", "value": "password", "temporary": false }
+      ],
+      "requiredActions": []
+    },
+    {
+      "username": "bob",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Bob",
+      "lastName": "Jones",
+      "email": "bob@example.com",
+      "credentials": [
+        { "type": "password", "value": "password", "temporary": false }
+      ],
+      "requiredActions": []
+    },
+    {
+      "username": "charlie",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Charlie",
+      "lastName": "Brown",
+      "email": "charlie@example.com",
+      "credentials": [
+        { "type": "password", "value": "password", "temporary": false }
       ],
       "requiredActions": []
     }
