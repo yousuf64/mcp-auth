@@ -23,7 +23,7 @@
       "directAccessGrantsEnabled": false,
       "redirectUris": ["http://localhost:7071/dashboard"],
       "webOrigins": ["http://localhost:7071"],
-      "defaultClientScopes": ["profile", "mcp:tools"],
+      "defaultClientScopes": ["openid", "profile", "mcp:tools"],
       "optionalClientScopes": [],
       "attributes": {
         "pkce.code.challenge.method": "S256"

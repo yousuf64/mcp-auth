@@ -251,17 +251,55 @@
 
   <div class="toast" id="toast"></div>
 
-  <script>
+  <script type="module">
+    import { jwtVerify, createRemoteJWKSet } from 'https://esm.sh/jose@6';
+
     // ── Auth config ──────────────────────────────────────────────────────────
     const KEYCLOAK_URL = 'http://localhost:8080/realms/mcp';
     const CLIENT_ID    = 'gateway-dashboard';
     const REDIRECT_URI = 'http://localhost:7071/dashboard';
     const SCOPE        = 'openid mcp:tools';
 
+    // ── OIDC discovery ────────────────────────────────────────────────────────
+    let oidcConfig = null;
+    async function loadOidcConfig() {
+      if (oidcConfig) return oidcConfig;
+      const res = await fetch(`${KEYCLOAK_URL}/.well-known/openid-configuration`);
+      if (!res.ok) throw new Error('Failed to fetch OIDC discovery document');
+      oidcConfig = await res.json();
+      return oidcConfig;
+    }
+
+    // ── JWKS (lazy, cached by jose internally) ────────────────────────────────
+    let jwks = null;
+    async function getJwks() {
+      if (jwks) return jwks;
+      const cfg = await loadOidcConfig();
+      jwks = createRemoteJWKSet(new URL(cfg.jwks_uri));
+      return jwks;
+    }
+
+    // ── id_token validation ───────────────────────────────────────────────────
+    // expectedNonce is only required on initial authorization_code exchange.
+    async function validateIdToken(idToken, expectedNonce = null) {
+      const [keys, cfg] = await Promise.all([getJwks(), loadOidcConfig()]);
+      const { payload } = await jwtVerify(idToken, keys, {
+        issuer:   cfg.issuer,
+        audience: CLIENT_ID,
+      });
+      if (expectedNonce !== null && payload.nonce !== expectedNonce)
+        throw new Error('id_token nonce mismatch');
+      return payload;
+    }
+
     // ── PKCE helpers ─────────────────────────────────────────────────────────
     function base64urlEncode(buf) {
       return btoa(String.fromCharCode(...new Uint8Array(buf)))
         .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+    }
+
+    function generateRandom() {
+      return base64urlEncode(crypto.getRandomValues(new Uint8Array(32)));
     }
 
     async function generatePkce() {
@@ -275,35 +313,34 @@
     function getTokens() {
       return {
         accessToken:  sessionStorage.getItem('access_token'),
+        idToken:      sessionStorage.getItem('id_token'),
         refreshToken: sessionStorage.getItem('refresh_token'),
         expiresAt:    Number(sessionStorage.getItem('expires_at') || 0),
       };
     }
 
     function storeTokens(data) {
-      sessionStorage.setItem('access_token',  data.access_token);
-      sessionStorage.setItem('expires_at',    String(Date.now() + data.expires_in * 1000));
-      if (data.refresh_token)
-        sessionStorage.setItem('refresh_token', data.refresh_token);
+      sessionStorage.setItem('access_token', data.access_token);
+      sessionStorage.setItem('expires_at',   String(Date.now() + data.expires_in * 1000));
+      if (data.refresh_token) sessionStorage.setItem('refresh_token', data.refresh_token);
+      if (data.id_token)      sessionStorage.setItem('id_token',      data.id_token);
     }
 
     function clearTokens() {
-      sessionStorage.removeItem('access_token');
-      sessionStorage.removeItem('refresh_token');
-      sessionStorage.removeItem('expires_at');
-      sessionStorage.removeItem('pkce_verifier');
-    }
-
-    function decodeJwtPayload(token) {
-      try {
-        return JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
-      } catch { return {}; }
+      ['access_token', 'id_token', 'refresh_token', 'expires_at',
+       'pkce_verifier', 'pkce_state', 'pkce_nonce', 'user_name'].forEach(k =>
+        sessionStorage.removeItem(k));
     }
 
     // ── Auth flow ─────────────────────────────────────────────────────────────
     async function redirectToLogin() {
       const { verifier, challenge } = await generatePkce();
+      const state = generateRandom();
+      const nonce = generateRandom();
       sessionStorage.setItem('pkce_verifier', verifier);
+      sessionStorage.setItem('pkce_state',    state);
+      sessionStorage.setItem('pkce_nonce',    nonce);
+      const cfg = await loadOidcConfig();
       const params = new URLSearchParams({
         response_type:         'code',
         client_id:             CLIENT_ID,
@@ -311,14 +348,29 @@
         scope:                 SCOPE,
         code_challenge:        challenge,
         code_challenge_method: 'S256',
+        state,
+        nonce,
       });
-      window.location.href = `${KEYCLOAK_URL}/protocol/openid-connect/auth?${params}`;
+      window.location.href = `${cfg.authorization_endpoint}?${params}`;
     }
 
-    async function exchangeCode(code) {
-      const verifier = sessionStorage.getItem('pkce_verifier');
-      if (!verifier) { await redirectToLogin(); return false; }
-      const res = await fetch(`${KEYCLOAK_URL}/protocol/openid-connect/token`, {
+    async function exchangeCode(code, returnedState) {
+      const verifier     = sessionStorage.getItem('pkce_verifier');
+      const storedState  = sessionStorage.getItem('pkce_state');
+      const nonce        = sessionStorage.getItem('pkce_nonce');
+
+      if (!verifier || !storedState) { await redirectToLogin(); return false; }
+
+      // CSRF guard
+      if (returnedState !== storedState) {
+        console.error('OAuth state mismatch — possible CSRF attempt');
+        clearTokens();
+        await redirectToLogin();
+        return false;
+      }
+
+      const cfg = await loadOidcConfig();
+      const res = await fetch(cfg.token_endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({
@@ -330,15 +382,34 @@
         }),
       });
       if (!res.ok) { clearTokens(); await redirectToLogin(); return false; }
-      storeTokens(await res.json());
-      sessionStorage.removeItem('pkce_verifier');
+
+      const data = await res.json();
+
+      // Validate id_token (signature + iss + aud + exp + nonce)
+      if (data.id_token) {
+        try {
+          const payload = await validateIdToken(data.id_token, nonce);
+          sessionStorage.setItem('user_name',
+            payload.preferred_username || payload.email || 'User');
+        } catch (err) {
+          console.error('id_token validation failed:', err);
+          clearTokens();
+          await redirectToLogin();
+          return false;
+        }
+      }
+
+      storeTokens(data);
+      ['pkce_verifier', 'pkce_state', 'pkce_nonce'].forEach(k =>
+        sessionStorage.removeItem(k));
       return true;
     }
 
     async function tryRefresh() {
       const { refreshToken } = getTokens();
       if (!refreshToken) { await redirectToLogin(); return false; }
-      const res = await fetch(`${KEYCLOAK_URL}/protocol/openid-connect/token`, {
+      const cfg = await loadOidcConfig();
+      const res = await fetch(cfg.token_endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({
@@ -348,25 +419,40 @@
         }),
       });
       if (!res.ok) { clearTokens(); await redirectToLogin(); return false; }
-      storeTokens(await res.json());
+
+      const data = await res.json();
+
+      // Validate refreshed id_token (no nonce check — nonce is only for initial auth)
+      if (data.id_token) {
+        try {
+          const payload = await validateIdToken(data.id_token);
+          sessionStorage.setItem('user_name',
+            payload.preferred_username || payload.email || 'User');
+        } catch (err) {
+          console.error('Refreshed id_token validation failed:', err);
+          clearTokens();
+          await redirectToLogin();
+          return false;
+        }
+      }
+
+      storeTokens(data);
       return true;
     }
 
     function renderUser() {
-      const { accessToken } = getTokens();
-      if (!accessToken) return;
-      const payload = decodeJwtPayload(accessToken);
-      const name = payload.preferred_username || payload.email || 'User';
+      const name = sessionStorage.getItem('user_name') || 'User';
       document.getElementById('user-label').textContent = `Hello, ${name}`;
     }
 
     async function initAuth() {
       const params = new URLSearchParams(window.location.search);
       const code   = params.get('code');
+      const state  = params.get('state');
 
       if (code) {
-        // Step 1: exchange code for tokens
-        const ok = await exchangeCode(code);
+        // Step 1: exchange code for tokens (verifies state + validates id_token)
+        const ok = await exchangeCode(code, state);
         history.replaceState(null, '', window.location.pathname);
         if (!ok) return;
         renderUser();
@@ -394,11 +480,16 @@
       await redirectToLogin();
     }
 
-    function logout() {
-      const postLogout = encodeURIComponent(REDIRECT_URI);
-      const url = `${KEYCLOAK_URL}/protocol/openid-connect/logout?client_id=${CLIENT_ID}&post_logout_redirect_uri=${postLogout}`;
+    async function logout() {
+      const { idToken } = getTokens();
+      const cfg = await loadOidcConfig();
+      const params = new URLSearchParams({
+        client_id:                CLIENT_ID,
+        post_logout_redirect_uri: REDIRECT_URI,
+      });
+      if (idToken) params.set('id_token_hint', idToken);
       clearTokens();
-      window.location.href = url;
+      window.location.href = `${cfg.end_session_endpoint}?${params}`;
     }
 
     // ── Authenticated fetch wrapper ───────────────────────────────────────────
@@ -538,6 +629,12 @@
         .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
         .replace(/"/g,'&quot;');
     }
+
+    // ── Expose to inline HTML event handlers (required for ES modules) ────────
+    window.logout        = logout;
+    window.addServer     = addServer;
+    window.connectServer = connectServer;
+    window.deleteServer  = deleteServer;
 
     // ── Boot ──────────────────────────────────────────────────────────────────
     initAuth();
