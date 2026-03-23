@@ -18,6 +18,7 @@ public class Tools
 
     [McpServerTool, Description("Relays a tool call to a registered downstream MCP server.")]
     public async Task<string> RelayCall(
+        McpServer server,
         [Description("Name of the downstream server to call.")] string serverName,
         [Description("Name of the tool to invoke on the downstream server.")] string tool,
         [Description("JSON object of parameters to pass to the tool.")] string paramsJson = "{}")
@@ -25,7 +26,7 @@ public class Tools
         var userId = _httpContextAccessor.HttpContext?.User?.FindFirstValue("sub");
         if (string.IsNullOrEmpty(userId))
             return "Error: Could not determine caller identity.";
-        return await _registry.RelayCallAsync(userId, serverName, tool, paramsJson, CancellationToken.None);
+        return await _registry.RelayCallAsync(userId, serverName, tool, paramsJson, server, CancellationToken.None);
     }
 
     [McpServerTool, Description("Returns a greeting message for the given name.")]

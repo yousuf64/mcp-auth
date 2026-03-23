@@ -165,6 +165,30 @@ app.MapGet("/api/oauth/callback/{serverId}", (DownstreamMcpRegistry registry, Ht
     return Results.Content(html, "text/html");
 });
 
+// GET /connect/{serverId}?token=...&elicitationId=...
+// Browser redirect target from an MCP elicitation URL — intentionally unauthenticated.
+// Verifies the HMAC-signed token, then redirects the browser directly to Keycloak.
+app.MapGet("/connect/{serverId}", async (DownstreamMcpRegistry registry, string serverId,
+    string token, string elicitationId, CancellationToken ct) =>
+{
+    if (!registry.TryVerifyConnectToken(serverId, token, out var userId, out _))
+        return Results.BadRequest("Invalid or expired authorization link.");
+
+    try
+    {
+        var authUrl = await registry.InitiateConnectFromElicitationAsync(userId, serverId, ct);
+        return Results.Redirect(authUrl.ToString());
+    }
+    catch (KeyNotFoundException)
+    {
+        return Results.NotFound("Server not found.");
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem($"Failed to initiate authorization: {ex.Message}");
+    }
+});
+
 // --- MCP ---
 app.MapMcp().RequireAuthorization();
 
