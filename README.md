@@ -39,6 +39,28 @@ The key ideas demonstrated:
 │  │  (JWT)   │              │  (port 7071)│  (stored   │(port 7072│  │
 │  └──────────┘              └─────────────┘   token)   └──────────┘  │
 └─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│          Flow 3 — relay_call with MCP URL-mode elicitation          │
+│                 (mid-call authorization, no dashboard)              │
+│                                                                     │
+│  ┌──────────┐  relay_call  ┌─────────────┐  -32042+URL ┌─────────┐  │
+│  │ AI Agent │ ───────────► │  GatewayMcp │ ──────────► │   MCP   │  │
+│  │  (JWT)   │ ◄─────────── │  (port 7071)│             │  Client │  │
+│  └──────────┘  auto-retry  └──────┬──────┘             └────┬────┘  │
+│                                   │ /connect/{serverId}      │      │
+│                                   │ (HMAC-signed URL)  user opens   │
+│                            ┌──────▼──────┐             ┌────▼────┐  │
+│                            │  Discord    │ ◄─────────── │ Browser │  │
+│                            │  Keycloak   │ ────────────►│         │  │
+│                            │ (port 8081) │  auth code   └─────────┘  │
+│                            └──────┬──────┘                          │
+│                                   │ tokens stored                   │
+│                            ┌──────▼──────┐                          │
+│                            │  GatewayMcp │──elicitation/complete──► │
+│                            │  (port 7071)│          MCP Client      │
+│                            └─────────────┘                          │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 **Flow 1** is a standard browser PKCE flow. The dashboard SPA authenticates the user against the Gateway Keycloak and receives a short-lived JWT, which is used to call the gateway's REST API (`/api/servers`, etc.).
@@ -153,7 +175,7 @@ After authenticating, the `relay_call` tool (and other gateway tools) appear in 
 Use relay_call to invoke the "list_channels" tool on server "DiscordMcp"
 ```
 
-> **Before calling `relay_call`:** the logged-in user must have registered and connected a downstream server via the dashboard (`http://localhost:7071/dashboard`). The gateway keys all per-user server connections by the `sub` claim in the IDE's JWT — the same identity used at login.
+> **Before calling `relay_call`:** the user must have **registered** the downstream server via the dashboard (`http://localhost:7071/dashboard`). **Authorization (connecting) is not required in advance** — if no usable token exists when `relay_call` is invoked, the gateway returns a JSON-RPC -32042 elicitation with a signed authorization URL. The MCP client presents the URL, the user completes the browser OAuth flow, and the tool call is retried automatically. Alternatively, the user can connect in advance through the dashboard as usual.
 
 ---
 
@@ -232,7 +254,24 @@ On `relay_call`, the gateway:
 3. Creates an `McpClient` with the stored `FileTokenCache` — the SDK automatically attaches the cached token (refreshing if expired)
 4. Forwards the tool call and returns the result
 
-If the token has expired and cannot be refreshed, the SDK calls `AuthorizationRedirectDelegate` again — in the relay path this returns `null` immediately and the gateway tells the caller to re-authorize via the dashboard.
+If the token is missing or expired, the gateway throws `UrlElicitationRequiredException` — the MCP client receives JSON-RPC error **-32042** containing a signed authorization URL, handles the browser flow automatically, and retries the tool call once tokens are available. See **Flow 3** below.
+
+### Flow 3 — MCP URL-mode elicitation (mid-call authorization)
+
+This is the protocol-native path for an AI agent to authorize a downstream server without ever touching the dashboard.
+
+**Trigger:** `relay_call` is invoked and no usable token exists for the requested server (either the token file is absent, or `HasUsableTokens()` determines it is within 60 seconds of expiry).
+
+**Steps:**
+
+1. The gateway generates a random `elicitationId`, builds a signed `/connect/{serverId}?token=...&elicitationId=...` URL, stores `(userId, serverId, McpServer)` in `_pendingElicitations`, and throws `UrlElicitationRequiredException`
+2. The MCP SDK converts this to JSON-RPC error **-32042** with an `ElicitRequestParams` (`mode=url`) carrying the connect URL — the MCP client (e.g. Cursor) presents the URL to the user
+3. The user opens the URL in a browser; the gateway verifies the HMAC-SHA256 signed token (payload: `{userId}:{serverId}:{elicitationId}:{expUnix}`, 10-minute expiry) and redirects the browser directly to Keycloak — the same DCR + authorization code flow as Flow 2
+4. After the user logs in, Keycloak redirects to `/api/oauth/callback/{serverId}`; the gateway exchanges the code for tokens and persists them via `FileTokenCache`
+5. The gateway scans `_pendingElicitations` for all entries matching the server, removes them, and fire-and-forgets `notifications/elicitation/complete` to each waiting `McpServer` instance
+6. The MCP client receives the notification and **automatically retries** the original `relay_call` — this time `HasUsableTokens()` returns `true` and the relay succeeds
+
+**Late expiry:** If the token file exists but the token is rejected at use time (expired between the `HasUsableTokens()` check and the actual relay attempt), the same elicitation is triggered from the `catch` block inside `RelayCallAsync`, producing a re-authorization URL.
 
 ---
 
@@ -243,6 +282,7 @@ If the token has expired and cannot be refreshed, the SDK calls `AuthorizationRe
 | GatewayMcp | `http://localhost:7071` |
 | GatewayMcp dashboard | `http://localhost:7071/dashboard` |
 | GatewayMcp OAuth callback | `http://localhost:7071/api/oauth/callback/{serverId}` |
+| GatewayMcp elicitation connect | `http://localhost:7071/connect/{serverId}` |
 | Gateway Keycloak | `http://localhost:8080/realms/mcp` |
 | DiscordMcp | `http://localhost:7072` |
 | Discord Keycloak | `http://localhost:8081/realms/discord` |
@@ -288,7 +328,7 @@ mcp-auth/
 ├── GatewayMcp/                         Gateway server (port 7071)
 │   ├── Program.cs                      JWT auth, REST API endpoints, MCP server setup
 │   ├── Tools.cs                        relay_call + utility tools
-│   ├── DownstreamMcpRegistry.cs        Per-user server registry, OAuth connect flow, relay logic
+│   ├── DownstreamMcpRegistry.cs        Per-user server registry, OAuth connect flows (dashboard + elicitation), relay logic
 │   ├── FileTokenCache.cs               ITokenCache implementation — persists tokens to disk
 │   ├── DownstreamServerEntry.cs        Server entry model
 │   └── wwwroot/index.html              PKCE dashboard SPA
